@@ -1,0 +1,541 @@
+8.4.1 Comprehensive Practice of Jenkins + GitLab + AWX
+Scenario description: This exercise is performed based on sections 7.4 and 8.3.3. In section
+8.3.3, an application is developed using Go. Yous can access the application through port
+8085 of the host where the application is located. To improve application stability, the
+application is deployed in a cluster. In addition, the reverse proxy function of Nginx
+(deployed on one client) is used at the front end to balance load. The Nginx deployment
+process is implemented by AWX.
+Step 1 Updating code.
+Modify the source code. The modified code is as follows:
+package main
+import (
+ "fmt"
+ "net/http"
+ "os"
+)
+func main() {
+ http.HandleFunc("/", hostnameHandler)
+ http.ListenAndServe(":8085", nil)
+}
+func hostnameHandler(w http.ResponseWriter, r *http.Request) {
+ hostname, err := os.Hostname()
+ if err != nil {
+ fmt.Fprintf(w, "Error getting hostname: %v", err)
+ } else {
+ fmt.Fprintf(w, "Hostname: %s\n", hostname)
+ }
+}
+
+
+To ensure that the Go application can be started successfully, create a shell script named
+start.sh for starting the task. The content is as follows:
+#!/bin/bash
+chmod a+x /home/web
+
+
+nohup /home/web > /dev/null 2>&1 &
+sleep 5
+systemctl restart sshd
+After the modification, upload it to GitLab, as shown in the following figure.
+
+
+git push
+
+
+Step 2 Compile a playbook.
+Obtain the code created in section 7.4 and add the reverse proxy configuration to the
+code. The modified playbook content is as follows:
+
+
+---
+- hosts: all
+ gather_facts: true
+ tasks:
+ - name: install nginx
+ yum:
+ name: nginx
+ state: present
+ - name: proxy config
+ template:
+ src: ./proxy.conf.j2
+ dest: /etc/nginx/conf.d/proxy.conf
+ when: ansible_hostname == "client-1"
+ notify: restart nginx
+ - name: enable nginx
+ service:
+ name: "{{ item }}"
+ state: started
+ enabled: yes
+ loop:
+ - nginx
+ - firewalld
+ - name: config firewalld
+ firewalld:
+ port: "{{ item }}"
+ permanent: yes
+ immediate: yes
+ state: enabled
+ loop:
+ - 80/tcp
+ - 8085/tcp
+ handlers:
+ - name: restart nginx
+ service:
+ name: nginx
+ state: restarted
+
+
+Compile the configuration file required by the reverse proxy as follows:
+upstream backend {
+ server {{ ansible_play_hosts[0] }}:8085;
+ server {{ ansible_play_hosts[1] }}:8085;
+}
+server {
+ location / {
+ proxy_pass http://backend;
+ }
+}
+
+Upload the modified and newly created files to GitLab, as shown in the following figure.
+
+
+git add
+git commit -m "2.5"
+
+
+Step 3 Configure AWX and obtain corresponding API.
+Create a workflow template named for-CI/CD based on the existing configuration. The
+configuration is as follows:
+
+Add a specific task for the workflow template. The first node type is Project
+Synchronization, specifically Project-A.
+
+⚫ Note: Project-A is generated in Step 6 in section 7.4 and is used to update the code
+of repository (http://172.16.0.14/hcie-openeuler/applicationa.git). Check whether it
+meets the requirements.
+The second node type is Task Template, specifically application-A. It is executed after
+the first node is executed successfully.
+
+
+
+⚫ Note: application-A is created in Step 7 in section 7.4. It uses Project-A and is also
+used to update the code of repository (http://172.16.0.14/hcieopeneuler/applicationa.git). Check whether it meets the requirements.
+After the configuration is complete, run the following commands to obtain the execution
+API address corresponding to the workflow template:
+[root@router ~]# curl -X GET --user admin:7yv37sFLaj3EPQ00LgwuT3sOoVQLkCgg
+http://www.openeuler-hcie.com:32453/awx/api/v2/workflow_job_templates/ -s | json_pp | grep -A 10
+CI/CD | grep launch
+ "launch" : "/api/v2/workflow_job_templates/14/launch/",
+
+
+Run the following command to check whether the for-CI/CD workflow can be
+successfully executed using the API address:
+[root@router ~]# curl -X POST --user admin:7yv37sFLaj3EPQ00LgwuT3sOoVQLkCgg
+http://www.openeuler-hcie.com:32453/awx/api/v2/workflow_job_templates/14/launch/ -s | json_pp
+
+
+Log in to AWX to check whether the workflow is started successfully, as shown in the
+following figure.
+
+
+If the workflow can be successfully completed, go to the next step.
+Step 4 Add a host.
+This exercise is performed on two hosts. Therefore, add client-2 by referring to step 3 in
+section 8.3.2.
+Step 5 Roll out the Jenkins deployment service.
+Create a new pipeline on Jenkins, name it for-CI/CD, and input the following pipeline
+script:
+
+pipeline {
+ agent any
+ stages {
+ stage('Pull code.') {
+ steps {
+ git branch: 'main', credentialsId: '0ce4ba97-2d29-4cc3-bcc3-1d5e11022019', url:
+'http://172.16.0.14/hcie-openeuler/jenkins-test.git'
+ }
+ }
+ stage('Compile the application.') {
+ steps {
+ sh '''#!/bin/bash
+ export GOROOT=/etc/jenkins/go
+ export PATH=$PATH:$GOROOT/bin
+ export GO111MODULE=off
+ go build /var/jenkins_home/workspace/for-CI/CD/web.go'''
+ }
+ }
+ stage ('Delete old application') {
+ steps {
+ sshPublisher(publishers: [sshPublisherDesc(configName: 'Client-1', transfers:
+[sshTransfer(cleanRemote: false, excludes: '', execCommand: 'rm -rf /home/web', execTimeout:
+120000, flatten: false, makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+',
+remoteDirectory: '', remoteDirectorySDF: false, removePrefix: '', sourceFiles: '')],
+usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false),
+sshPublisherDesc(configName: 'Client-2', transfers: [sshTransfer(cleanRemote: false, excludes: '',
+execCommand: 'rm -rf /home/web', execTimeout: 120000, flatten: false, makeEmptyDirs: false,
+noDefaultExcludes: false, patternSeparator: '[, ]+', remoteDirectory: '', remoteDirectorySDF: false,
+removePrefix: '', sourceFiles: '')], usePromotionTimestamp: false, useWorkspaceInPromotion: false,
+verbose: false)])
+ }
+ }
+ stage('Stop the running application.') {
+ steps {
+ sshPublisher(publishers: [sshPublisherDesc(configName: 'Client-1', transfers:
+[sshTransfer(cleanRemote: false, excludes: '', execCommand: 'kill -9 $(ps -aux | grep web | awk \'{print
+$2}\' | head -n 1)', execTimeout: 120000, flatten: false, makeEmptyDirs: false, noDefaultExcludes:
+false, patternSeparator: '[, ]+', remoteDirectory: '', remoteDirectorySDF: false, removePrefix: '',
+sourceFiles: '')], usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false),
+sshPublisherDesc(configName: 'Client-2', transfers: [sshTransfer(cleanRemote: false, excludes: '',
+execCommand: 'kill -9 $(ps -aux | grep web | awk \'{print $2}\' | head -n 1)', execTimeout: 120000,
+flatten: false, makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+',
+remoteDirectory: '', remoteDirectorySDF: false, removePrefix: '', sourceFiles: '')],
+usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false)])
+ }
+ }
+ stage('Send the application.') {
+ steps {
+ sshPublisher(publishers: [sshPublisherDesc(configName: 'Client-1', transfers:
+[sshTransfer(cleanRemote: false, excludes: '', execCommand: '', execTimeout: 120000, flatten: false,
+makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+', remoteDirectory: '/',
+remoteDirectorySDF: false, removePrefix: '', sourceFiles: 'web')], usePromotionTimestamp: false,
+useWorkspaceInPromotion: false, verbose: false), sshPublisherDesc(configName: 'Client-2', transfers:
+[sshTransfer(cleanRemote: false, excludes: '', execCommand: '', execTimeout: 120000, flatten: false, 
+makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+', remoteDirectory: '/',
+remoteDirectorySDF: false, removePrefix: '', sourceFiles: 'web')], usePromotionTimestamp: false,
+useWorkspaceInPromotion: false, verbose: false)])
+ }
+ }
+ stage('Send the startup script.') {
+ steps {
+ sshPublisher(publishers: [sshPublisherDesc(configName: 'Client-1', transfers:
+[sshTransfer(cleanRemote: false, excludes: '', execCommand: 'sh /home/start.sh', execTimeout:
+120000, flatten: false, makeEmptyDirs: false, noDefaultExcludes: false, patternSeparator: '[, ]+',
+remoteDirectory: '/', remoteDirectorySDF: false, removePrefix: '', sourceFiles: 'start.sh')],
+usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false),
+sshPublisherDesc(configName: 'Client-2', transfers: [sshTransfer(cleanRemote: false, excludes: '',
+execCommand: 'sh /home/start.sh', execTimeout: 120000, flatten: false, makeEmptyDirs: false,
+noDefaultExcludes: false, patternSeparator: '[, ]+', remoteDirectory: '/', remoteDirectorySDF: false,
+removePrefix: '', sourceFiles: 'start.sh')], usePromotionTimestamp: false, useWorkspaceInPromotion:
+false, verbose: false)])
+ }
+ }
+ stage('Call AWX') {
+ steps {
+ sh 'curl -X POST --user admin:7yv37sFLaj3EPQ00LgwuT3sOoVQLkCgg
+http://www.openeuler-hcie.com:32453/awx/api/v2/workflow_job_templates/14/launch/'
+ }
+ }
+ }
+}
+
+
+After the configuration is complete, click Save and execute the pipeline.
+⚫ Question: Is the pipeline successfully executed? Why?
+⚫ Answer: If the execution fails, Jenkins cannot resolve the AWX domain name. As a
+result, the corresponding API cannot be called. In this case, you can add DNS servers
+or manually add domain name entries on Kubernetes. The following describes how
+to manually add domain name entries on Kubernetes:
+Run the kubectl edit cm -n kube-system command to edit the ConfigMap file, add the
+content in the red box shown in the following figure, save the file, and exit.
+
+
+After the modification is complete, perform the task build again.
+
+
+Step 6 Conduct a test.
+Conduct a test on the client to check whether the requirements are met. If yes, the
+information similar to the following figure is displayed.
+
+8.4.2 Dynamic Slave Implemented on Jenkins + Harbor +
+Kubernetes
+Scenario description: Use the same code as that in section 8.4.1 to develop an application,
+deploy the developed application in Kubernetes, and release the application using the
+service and Ingress. This exercise is implemented based on the dynamic slave of Jenkins.
+Step 1 Install Harbor.
+In this exercise, Harbor is deployed in the same ECS as GitLab through containerized
+deployment. Run the git clone https://gitee.com/yftyxa/harbor.git command to obtain
+the online installation package of Harbor and decompress the .tar package.
+git clone https://gitee.com/yftyxa/harbor.git
+cd harbor
+tar -xzf harbor-online-installer-v2.9.1.tgz
+Go to the directory generated after the decompression, copy harbor.yml.tmpl as
+harbor.yml, and modify it as follows:
+
+
+
+Change hostname to the IP address of the local host, comment out all HTTPS-related
+configurations, and change the HTTP port number of Harbor to 8088 because GitLab has
+occupied port 80. Save the configuration and exit.
+Run the following command to install the Harbor dependency:
+yum install -y docker-compose-1.22.0-4.oe2203.noarch
+After the installation is complete, run the sh install.sh command to deploy Harbor. Wait
+until all containers are created, as shown in the following figure.
+
+
+Step 2 Configure Harbor.
+Use the EIP corresponding to the ECS and port 8088 to log in to the Harbor server, as
+shown in the following figure.
+The default password is specified in the configuration file and can be changed based on
+the actual situation.
+After logging in to Harbor, click NEW PROJECT.
+
+In the displayed dialog box, enter the project name, set it to Public, and retain the
+default settings of other options, as shown in the following figure.
+
+
+Step 3 Interconnect Kubernetes with Harbor.
+In this exercise, Docker is used to run containers. By default, Docker uses HTTPS to
+connect to the image repository. Therefore, Kubernetes uses the same method to pull
+images. To enable Kubernetes and Docker to use the image repository created and
+configured in Step 1 and Step 2 in HTTP mode, add the following configuration to the
+Docker configuration file /etc/docker/daemon.josn on all Kubernetes nodes:
+"insecure-registries": ["172.16.0.14:8088"]
+See the following figure.
+
+After the configuration is complete, restart Docker for the configuration to take effect.
+Step 4 Prepare a base image.
+In this exercise, openeuler 22.03 is used as the base image. Therefore, run the following
+command to pull the image from public images:
+docker pull swr.cn-east-3.myhuaweicloud.com/hcie_openeuler/openeuler:22.03lts
+After that, run the following command to label the image:
+docker tag swr.cn-east-3.myhuaweicloud.com/hcie_openeuler/openeuler:22.03lts
+172.16.0.14:8088/hcie-openeuler/openeuler:22.03lts
+Push the image to the Harbor repository set up in Step 1. The Harbor repository is set up
+in HTTP mode, but Docker requires HTTPS by default. Therefore, you need to add the
+following information to the Docker configuration file /etc/docker/daemon.json:
+{
+ "insecure-registries": ["172.16.0.14:8088"]
+}
+
+
+Run the following commands to reload Docker:
+systemctl daemon-reload
+systemctl restart docker
+After reloading Docker, log in to the Harbor server and run the following commands to
+push the image to the Harbor server:
+docker-compose restart
+docker login -u admin -p Harbor12345 172.16.0.14:8088
+docker push 172.16.0.14:8088/hcie-openeuler/openeuler:22.03lts
+After the upload is complete, you can view the pushed image on the Harbor page, as
+shown in the following figure.
+
+
+Step 5 Prepare resources.
+Add the Dockerfile that will be used later to the code repository. The content is as
+follows:
+FROM 172.16.0.14:8088/hcie-openeuler/openeuler:22.03lts
+COPY web .
+RUN chmod a+x web
+EXPOSE 8085/tcp
+CMD ./web
+Add a YAML file that will be used to create various objects to the code repository. The
+content is as follows:
+#####Create a namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+ name: jenkins
+---
+#####Create a deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+ name: applicationa
+ namespace: jenkins
+ labels:
+ app: applicationa
+spec:
+ replicas: 3
+ selector:
+ matchLabels:
+ app: applicationa
+ template:
+ metadata:
+ labels:
+ app: applicationa
+ spec:
+ containers:
+ - image: ${harborHost}/${harborRepo}/test:${tag}
+ name: applicationa
+ imagePullPolicy: Always
+---
+#####Create a service.
+apiVersion: v1
+kind: Service
+metadata:
+ name: applicationa
+ namespace: jenkins
+ annotations:
+ prometheus.io/scrape: 'true'
+ prometheus.io/path: /
+ prometheus.io/port: '8080'
+spec:
+ selector:
+ app: applicationa
+ type: NodePort
+ ports:
+ - port: 8085
+ targetPort: 8085
+ nodePort: 32010
+---
+#####Create Ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+ name: applicationa
+ namespace: jenkins
+ annotations:
+ kubernetes.io/ingress.class: "nginx"
+ nginx.ingress.kubernetes.io/rewrite-target: /$2
+ nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+rules:
+ - host: www.openeuler-hcie.com
+ http:
+ paths:
+ - backend:
+ service:
+name: applicationa
+ port:
+ number: 8080
+ path: /for-k8s(/|$)(.*)
+ pathType: Prefix
+
+
+
+After the compilation is complete, push all configuration files to the code repository
+http://172.16.0.14/hcie-openeuler/jenkins-test.git.
+Push the Kubernetes authentication file .kube/config to the code repository. The final
+files in the code repository are as follows:
+
+
+config is the Kubernetes authentication file, Dockerfile is used to generate the container
+image of the application, and deploy.yml is the application deployment file.
+Step 6 Install plugins.
+Install the Git Parameter and Kubernetes plugins and restart Jenkins for the plugins to
+take effect.
+Step 7 Add a Kubernetes cluster.
+After the Kubernetes plugin is installed, click Clouds on the Manage Jenkins page to add
+a Kubernetes cluster, as shown in the following figure.
+
+
+On the displayed page, click New cloud, as shown in the following figure.
+
+
+On the displayed page, enter a cloud name and set Type to Kubernetes, as shown in the
+following figure.
+
+
+Click Create. On the displayed page, expand Kubernetes Cloud detail to supplement
+details, as shown in the following figure.
+
+
+You need to set Kubernetes address and Kubernetes service certificate key. The
+corresponding parameters can be obtained by running cat /root/.kube/config on the
+Kubernetes control node, as shown in the following figure.
+
+
+
+Save the content of certificate-authority-data to the certificate-authority-data file, the
+content of client-certificate-data to the client-certificate-data file, and the content of
+client-key-data to the client-key-data file. Run the following commands to convert
+these files to certificate files encrypted using Base64:
+cat certificate-authority-data | base64 -d > ca.crt
+cat client-certificate-data | base64 -d > client.crt
+cat client-key-data | base64 -d > client.key
+
+
+Run the following command to generate the Client P12 authentication file cert.pfx using
+the three certificate files:
+openssl pkcs12 -export -out cert.pfx -inkey client.key -in client.crt -certfile ca.crt
+You need to enter the password when generating the authentication file. Do not lose the
+password because it will be used later.
+When configuring Kubernetes Cloud detail, enter the Kubernetes URL, Kubernetes
+service certificate key, and Kubernetes namespace. The details are as follows:
+
+
+The Kubernetes service certificate key is the content of ca.crt.
+In the Credentials area, click Add.
+
+The details of the added credential are as follows:
+
+
+Click Save and select the created credential from the Credentials drop-down list, as
+shown in the following figure.
+Ensure that the information is correct and click Test Connection. See the following
+figure.
+
+
+In the Jenkins URL text box, enter the service domain name and port number of Jenkins,
+as shown in the following figure.
+
+
+Step 8 Customize containers.
+In this exercise, two containers are customized. One is used to compile the Go
+application, and the other is used to create the container image for running the Go
+program and create related Kubernetes resource objects.
+Use the following Dockerfile to create the first image:
+FROM swr.cn-east-3.myhuaweicloud.com/hcie_openeuler/golang:1.17.3
+RUN mkdir /home/jenkins \
+ && useradd -u 1000 -d /home/jenkins jenkins \
+ && chown 1000:1000 /home/jenkins
+USER Jenkins
+After the compilation is complete and the image is generated, push it to the private
+image repository installed in Step 1.
+docker build -t 172.16.0.14:8088/hcie-openeuler/golang:1.17.3 .
+docker push 172.16.0.14:8088/hcie-openeuler/golang:1.17.3
+Use the following Dockerfile to create the second image:
+FROM swr.cn-east-3.myhuaweicloud.com/hcie_openeuler/jenkins-docker:1.0
+USER root
+RUN echo "docker:x:987:jenkins" >> /etc/group
+USER Jenkins
+After the compilation is complete and the image is generated, push it to the same private
+image repository.
+docker build -t 172.16.0.14:8088/hcie-openeuler/jenkins-docker:1.0 .
+docker push 172.16.0.14:8088/hcie-openeuler/jenkins-docker:1.0
+Step 9 Create a pipeline project and compile a pipeline script.
+Create a pipeline project, select Parameterized Build Process, and set the following
+variables in sequence.
+
+
+Compile the pipeline script as follows:
+podTemplate(
+ containers: [
+ containerTemplate(name: 'golang', image: '172.16.0.14:8088/hcie-openeuler/golang:1.17.3',
+command: 'sleep', args: '99d'),
+ containerTemplate(name: 'docker', image: '172.16.0.14:8088/hcie-openeuler/jenkinsdocker:1.0', command: 'sleep', args: '99d')],
+ volumes: [hostPathVolume(hostPath: '/run/docker.sock', mountPath: '/run/docker.sock',
+readOnly: false),
+ hostPathVolume(hostPath: '/usr/bin/kubectl', mountPath: '/usr/bin/kubectl',
+readOnly: false)
+ ]) {
+node(Pod_LABEL) {
+ stage('Generate an application.') {
+ container('golang') {
+ stage('Pull code.') {
+ git branch: '${tag}', credentialsId: '0ce4ba97-2d29-4cc3-bcc3-1d5e11022019',
+url: 'http://172.16.0.14/hcie-openeuler/jenkins-test.git'
+ }
+ stage('Compile code.') {
+ sh 'go build web.go'
+ }
+ }
+ }
+ stage('Deploy the application.'){
+ container('docker') {
+ stage('Generate an image and push it.') {
+ sh 'docker build -t ${HarborHost}/${harborRepo}/test:${tag} . && docker login -
+u ${harborUser} -p ${harborPasswd} ${HarborHost} && docker push
+${HarborHost}/${harborRepo}/test:${tag}'
+ }
+ stage('Deploy a deployment.') {
+ sh 'kubectl --kubeconfig ./config apply -f deploy.yml'
+ }
+ }
+ }
+ }
+}
+
+
+
+
