@@ -1,0 +1,254 @@
+8.3.1 Resource Preparations
+Step 1 Prepare code.
+Compile the following code on the client:
+package main
+import (
+ "io"
+ "log"
+ "net/http"
+)
+func sayHello(w http.ResponseWriter, r *http.Request) {
+ io.WriteString(w, "Hello, openEuler")
+}
+func main() {
+ http.HandleFunc("/", sayHello)
+ log.Println("Server is running on port 8085...")
+ if err := http.ListenAndServe(":8085", nil); err != nil {
+ log.Fatal(err)
+ }
+}
+
+Step 2 Push code.
+Create a repository jenkins-test in GitLab and push the code to the repository for Jenkins
+to pull. (The detailed process is not described here.)
+Step 3 (Optional) Prepare the Go software package.
+Go is required for subsequent application build and compilation, but the corresponding
+installation package cannot be downloaded from the official website. Therefore, you
+need to manually place the installation package in a specific directory of Jenkins and set
+environment variables. In this example, the software package is stored in the
+/etc/jenkins/go directory of the host and mounted to the corresponding position in the
+pod. This method is not recommended in real-world working scenarios.
+Run the following commands on the host where the pod is running to use the Go agent
+of Huawei Cloud:
+export GO111MODULE=on
+export GOPROXY=https://mirrors.huaweicloud.com/repository/goproxy/
+export GONOSUMDB=*
+Create a /etc/Jenkins/go directory and download the Go package of the corresponding
+version. For example, version 1.17.3 is used in this exercise, which is obtained by running
+the following commands.
+wget https://golang.org/dl/go1.17.3.linux-amd64.tar.gz
+tar -xzf go1.17.3.linux-amd64.tar.gz
+After that, add the following content to the deployment of Jenkins:
+….
+ volumeMounts:
+ - name: jenkins-data
+ mountPath: /var/jenkins_home
+ - name: go
+ mountPath: /etc/jenkins/go
+ volumes:
+- name: jenkins-data
+ persistentVolumeClaim:
+ claimName: jenkins
+ - name: go
+ hostPath:
+ path: /etc/jenkins/go/go
+
+
+Log in to the pod and configure Go-related environment variables (method used in this
+exercise). You can also configure them in the YAML file.
+
+[root@k8smaster1 jenkins]# kubectl exec -it jenkins-dcb97cd98-dmqd4 -n devops -- /bin/bash
+jenkins@jenkins-dcb97cd98-dmqd4:/etc/jenkins/go$ echo "export GOROOT=/etc/jenkins/go" >>
+jenkins@jenkins-dcb97cd98-dmqd4:/etc/jenkins/go$ export PATH=$PATH:$GOROOT/bin
+Check whether the configuration takes effect. If it does, the information similar to the
+following figure is displayed.
+
+
+8.3.2 Primary Operations of Jenkins CI/CD
+Step 1 (Optional) Initialize Jenkins.
+On the Dashboard page of Jenkins, click Manage Jenkins and then Plugins to install
+plugins.
+
+
+
+On the displayed page, click Available plugins, type Locale in the search box, select the
+corresponding plugin, and click Install.
+
+Wait until the plugin is installed.
+
+
+Use the same method to install the plugin Localization: Chinese (Simplified).
+After the installation is complete, add /restart to the end of the URL for accessing
+Jenkins in the browser, as shown in the following figure.
+
+On the displayed page, click Yes to restart Jenkins. After the restart is complete, the login
+page is displayed.
+
+
+Step 2 Install required plugins.
+This exercise requires three plugins: Go Plugin (search for Go), GitLab, and Publish Over
+SSH. Use the method in step 1 to install them.
+After the installation is complete, you can view the installed plugins in Installed plugins,
+as shown in the following figures.
+
+Restart Jenkins for the plugins to take effect.
+
+
+
+Step 3 Add a remote host.
+On the Jenkins home page, choose Manage Jenkins > System.
+Drag to the bottom of the new page, find Publish over SSH, click Add, and enter related
+information. A host is used in this exercise.
+
+Enter the password of the host user in Passphrase. In this exercise, the password of the
+root user is typed.
+After the configuration is complete, click Save.
+Step 4 Configure the build environment.
+On the Jenkins home page, choose Manage Jenkins > System Configuration > Tools.
+
+On the displayed page, click Go Install at the bottom, set parameters as prompted, and
+deselect Automatic Installation.
+
+Click Save.
+Step 5 Create a build task.
+Return to the Jenkins home page and click New Task. On the displayed page, enter
+ProjectA and choose Freestyle project.
+
+
+After the configuration is complete, click OK. On the displayed page, click Source Code
+Management and enter the code information prepared in section 8.3.1 as prompted, as
+shown in the following figure.
+
+
+
+
+In the Credentials area, click Add. In the displayed dialog box, enter the GitLab
+authentication information as prompted.
+
+Specify the branch as */main, as shown in the following figure.
+
+In the Build Environment area, select the tool corresponding to Go, as shown in the
+following figure.
+
+After the configuration is complete, click Build Steps in the navigation tree on the left,
+click Add build step, and select Execute shell, as shown in the following figure.
+
+
+The details are as follows:
+#!/bin/bash
+export GOROOT=/etc/jenkins/go
+export PATH=$PATH:$GOROOT/bin
+export GO111MODULE=off
+go build /var/jenkins_home/workspace/ProjectA/web.go
+The compiled program needs to be sent to the client for execution. Therefore, add Send
+files or execute commands over SSH after the build step. The configuration is as
+follows
+send files or execute commands over SSH
+No information is returned when the application is executed over SSH. Therefore, Jenkins
+does not end the connection until the connection times out and considers build task
+"UNSTABLE". To accelerate the build time, reduce the timeout period in Advanced of
+Send files or execute commands over SSH, as shown in the following figure.
+
+
+After the configuration is complete, click Save. On the displayed page, click Build Now
+and click the number corresponding to build task.
+
+
+On the displayed page, click Console Output to view the build process, as shown in the
+following figure.
+
+Log in to client-1 and check whether the task is successfully executed, as shown in the
+following figure.
+ps -aux | grep web
+
+
+8.3.3 Primary Usage of Jenkins Pipelines
+This exercise describes how to implement the content in section 8.3.2 using a pipeline.
+Step 1 Install the pipeline plugin.
+Use the preceding method to install the Pipeline and Pipeline Stage View plugins.
+
+Step 2 Create a pipeline.
+On the Jenkins home page, click New Task. On the displayed page, type pipelineA and
+choose Pipeline, as shown in the following figure.
+
+
+
+Click OK.
+Step 3 Compile a pipeline script.
+Go to the pipelineA configuration page, locate where to configure the pipeline, and select
+Hello World on the right to generate the basic syntax format, as shown in the following
+figure.
+
+The subsequent script will be modified based on the generated script.
+Click Pipeline Syntax under the pipeline.
+
+
+
+On the new page, generate code based on the information about ProjectA. For example,
+in the Source Code Management area of ProjectA, select git:Git and enter the
+corresponding information, as shown in the following figure.
+
+
+
+After the configuration is complete, click Generate Pipeline Script. The system
+automatically generates the corresponding script, as shown in the following figure.
+
+
+Copy the generated script to the corresponding position in the pipeline, as shown in the
+following figure.
+
+The subsequent steps are basically performed in a shell script. Therefore, the
+corresponding module is sh: Shell Script, as shown in the following figure.
+
+Use the same steps to compile the code. The final code is as follows:
+pipeline {
+ agent any
+ stages {
+ stage('Pull code.') {
+ steps {
+ git branch: 'main', credentialsId: '0ce4ba97-2d29-4cc3-bcc3-1d5e11022019', url:
+'http://172.16.0.14/hcie-openeuler/jenkins-test.git'
+ }
+ }
+ stage('Compile an application.') {
+ steps {
+ sh '''#!/bin/bash
+ export GOROOT=/etc/jenkins/go
+ export PATH=$PATH:$GOROOT/bin
+ export GO111MODULE=off
+ go build /var/jenkins_home/workspace/ProjectA/web.go'''
+ }
+ }
+ stage('Send and start the application.') {
+ steps {
+ sshPublisher(publishers: [sshPublisherDesc(configName: 'Client-1', transfers:
+[sshTransfer(cleanRemote: false, excludes: '', execCommand: '''chmod a+x /home/web
+/home/web &''', execTimeout: 10000, flatten: false, makeEmptyDirs: false, noDefaultExcludes: false,
+patternSeparator: '[, ]+', remoteDirectory: '/', remoteDirectorySDF: false, removePrefix: '', sourceFiles:
+'web')], usePromotionTimestamp: false, useWorkspaceInPromotion: false, verbose: false)])
+ }
+ }
+ }
+}
+
+
+
+After the configuration is complete, click Save.
+Step 4 Build an application.
+After the configuration is complete, click Build Now to execute the task.
+
+Click a phase to view the logs of this phase, as shown in the following figure.
+
+
+⚫ Question: What are the defects of the application deployment modes of exercises in
+8.3.2 and 8.3.3?
+⚫ Answer: If the applications in sections 8.3.2 and 8.3.3 are updated, the deployment
+on the same host will fail after the update. This is because the running old
+application is not killed before the new application is deployed. As a result, the port
+is occupied and the new application cannot run properly. This defect will be fixed in
+subsequent exercise in section 8.4.
+
+
+
+
+
