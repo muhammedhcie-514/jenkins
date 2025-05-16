@@ -1,0 +1,284 @@
+8.2.1 Storage Resource Preparations
+Step 1 Create a resource pool in Ceph.
+The specific steps have been described in previous exercises. The following describes only
+key steps.
+Run the following commands to create storage resources required by Jenkins in Ceph:
+[ceph: root@ceph01 /]# ceph osd pool create metadata_jenkins
+[ceph: root@ceph01 /]# ceph osd pool create data_jenkins
+[ceph: root@ceph01 /]# ceph fs new jenkins metadata_jenkins data_jenkins
+[ceph: root@ceph01 /]# ceph orch apply mds jenkins --placement="2"
+[ceph: root@ceph01 /]# ceph fs authorize jenkins client.jenkins / rwps -o ceph.client.jenkins.keyring
+Step 2 Compile the PVC and StorageClass files.
+All Jenkins-related objects are stored in the namespace named devops. Therefore, set the
+related parameter to devops during file compilation.
+Create a secret file with the following content:
+---
+apiVersion: v1
+kind: Secret
+metadata:
+ name: csi-secret
+ namespace: devops
+stringData:
+ # Required for statically provisioned volumes
+ userID: jenkins
+ userKey: AQA9UgllXXXXXXXXXXXXXXWgaY6F1OA==
+ # Required for dynamically provisioned volumes
+ adminID: admin
+ adminKey: AQA9UgllXXXXXXXXXXXXXWgaY6F1OA==
+ # Encryption passphrase
+ encryptionPassphrase: test_passphrase
+
+
+
+Create a ceph-conf-map.yaml file. The file content is as follows:
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+ config.json: |-
+ {}
+metadata:
+ name: ceph-csi-encryption-kms-config
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+ ceph.conf: |
+ [global]
+ auth_cluster_required = cephx
+ auth_service_required = cephx
+ auth_client_required = cephx
+ # keyring is a required key and its value should be empty
+ keyring: |
+metadata:
+ name: ceph-config
+
+Create a csi-config-map.yaml file. The file content is as follows:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+ name: "ceph-csi-config"
+data:
+ config.json: |-
+ [
+ {
+ "clusterID": "3568bbc0-84XXXXXXXXXXXa163ef0485d",
+ "monitors": [
+ "192.168.0.21:6789",
+ "192.168.0.22:6789",
+"192.168.0.23:6789"
+ ]
+ }
+ ]
+
+
+
+Set --extra-create-metadata to false.
+The PVC file contains the following information:
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+ name: jenkins
+ namespace: devops
+spec:
+ storageClassName: jenkins
+ accessModes:
+ - ReadWriteOnce
+ resources:
+ requests:
+ storage: 5Gi
+The StorageClass file contains the following information:
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+ name: jenkins
+ namespace: devops
+provisioner: cephfs.csi.ceph.com
+parameters:
+ clusterID: d5faf9ba-56c0-11ee-9ffe-fa163edb3348
+ fsName: jenkins
+ pool: data_jenkins
+ csi.storage.k8s.io/provisioner-secret-name: csi-secret
+ csi.storage.k8s.io/provisioner-secret-namespace: devops
+ csi.storage.k8s.io/controller-expand-secret-name: csi-secret
+ csi.storage.k8s.io/controller-expand-secret-namespace: devops
+ csi.storage.k8s.io/node-stage-secret-name: csi-secret
+ csi.storage.k8s.io/node-stage-secret-namespace: devops
+ mounter: kernel
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+Run the kubectl create namespace devops command to create the required namespace,
+and then deploy objects such as config-map, secret, PVC, and StorageClass in sequence to
+ensure that the PVC status is normal.
+kubectl get pvc -n devops
+
+
+8.2.2 Jenkins Installation
+Step 1 Implement authentication management.
+Compile a file for authentication management as follows:
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+ name: jenkins-admin
+rules:
+ - apiGroups: [""]
+ resources: ["*"]
+ verbs: ["*"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+ name: jenkins-admin
+ namespace: devops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+ name: jenkins-admin
+roleRef:
+ apiGroup: rbac.authorization.k8s.io
+ kind: ClusterRole
+ name: jenkins-admin
+subjects:
+- kind: ServiceAccount
+ name: jenkins-admin
+ namespace: devops
+After the compilation is complete, deploy it. The result is as follows:
+[root@k8smaster1 jenkins]# kubectl apply -f jenkins.yml
+clusterrole.rbac.authorization.k8s.io/jenkins-admin created
+serviceaccount/jenkins-admin created
+clusterrolebinding.rbac.authorization.k8s.io/jenkins-admin created
+Step 2 Deploy Jenkins.
+Jenkins is deployed in Kubernetes as a deployment. Compile the corresponding file as
+follows:
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+ name: jenkins
+ namespace: devops
+spec:
+ replicas: 1
+ selector:
+matchLabels:
+ app: jenkins-server
+ template:
+ metadata:
+ labels:
+ app: jenkins-server
+ spec:
+ securityContext:
+ fsGroup: 1000
+ runAsUser: 1000
+ serviceAccountName: jenkins-admin
+ containers:
+ - name: jenkins
+ image: swr.cn-east-3.myhuaweicloud.com/hcie_openeuler/jenkins:lts
+ resources:
+ limits:
+ memory: "2Gi"
+ cpu: "1000m"
+ requests:
+ memory: "500Mi"
+ cpu: "500m"
+ ports:
+ - name: httpport
+ containerPort: 8080
+ - name: jnlpport
+ containerPort: 50000
+ livenessProbe:
+ httpGet:
+ path: "/login"
+ port: 8080
+ initialDelaySeconds: 90
+ periodSeconds: 10
+ timeoutSeconds: 5
+ failureThreshold: 5
+ readinessProbe:
+ httpGet:
+ path: "/login"
+ port: 8080
+ initialDelaySeconds: 60
+ periodSeconds: 10
+ timeoutSeconds: 5
+ failureThreshold: 3
+ volumeMounts:
+ - name: jenkins-data
+ mountPath: /var/jenkins_home
+ volumes:
+ - name: jenkins-data
+ persistentVolumeClaim:
+ claimName: jenkins
+
+After the compilation is complete, deploy the deployment and wait until it status is
+normal.
+
+
+kubectl get deploy -n devops
+
+Step 3 Deploy a service.
+Compile a service file as follows:
+apiVersion: v1
+kind: Service
+metadata:
+ name: jenkins-service
+ namespace: devops
+ annotations:
+ prometheus.io/scrape: 'true'
+ prometheus.io/path: /
+ prometheus.io/port: '8080'
+spec:
+ selector:
+ app: jenkins-server
+ type: NodePort
+ ports:
+ - name: http
+ port: 8080
+ targetPort: 8080
+ nodePort: 32000
+ - name: agent
+ port: 50000
+ protocol: TCP
+After the compilation is complete, deploy the service and wait until it status is normal.
+kubectl get service -n devops
+
+Step 4 (Optional) Use Ingress to release the service.
+Compile the Ingress file as follows:
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+ name: jenkins
+ namespace: devops
+ annotations:
+ kubernetes.io/ingress.class: "nginx"
+ nginx.ingress.kubernetes.io/rewrite-target: /$2
+ nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+rules:
+ - host: www.openeuler-hcie.com
+ http:
+ paths:
+- backend:
+ service:
+ name: jenkins-service
+ port:
+ number: 8080
+ path: /jenkins(/|$)(
+
+After the compilation is complete, deploy Ingress and wait until it status is normal.
+kubectl describe ingress jenkins -n devops
+
+
+Manually resolve or use DNS to resolve http://www.openeuler-hcie.com/ to the ingresscontroller address. Type http://www.openeuler-hcie.com:32000/ in the address box of the
+browser to attempt to access the ingress-controller address. If the access is normal,
+information about how to obtain the administrator password pops out.
+Run the following command to obtain the administrator password:
+kubectl exec -it jenkins-xxxxxx cat /var/jenkins_home/secrets/initialAdminPassword -n devops
+See the following figure.
+
+Use the obtained password to log in to Jenkins. Then, the system prompts you to install
+plugins. (This step is skipped in this exercise.)
+
+
+
+
